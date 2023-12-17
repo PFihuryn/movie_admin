@@ -1,0 +1,194 @@
+services:
+
+  nginx:
+    image: nginx:1.21.6
+    container_name: nginx
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./nginx/conf.d:/etc/nginx/conf.d:ro
+      - nginx-logs:/var/log/nginx/
+      - static_volume:/usr/src/static/
+      - media_volume:/usr/src/media/
+    depends_on:
+      admin_panel:
+        condition: service_healthy
+    ports:
+      - "80:80"
+
+  movies_backend:
+    container_name: movies_backend
+    image: allyotov/movies_backend:1.0.7
+    environment:
+      - POSTGRES_PORT=${MOVIE_DB_PORT}
+      - POSTGRES_HOST=${MOVIE_DB_HOST}
+      - POSTGRES_USER=${MOVIE_DB_USER}
+      - POSTGRES_PASSWORD=${MOVIE_DB_PASSWORD}
+      - CACHE_TIME_LIFE=${CACHE_TIME_LIFE}
+      - ES_HOST=${ES_HOST}
+      - ES_PORT=${ES_PORT}
+      - PROJECT_NAME=${PROJECT_NAME}
+      - REDIS_HOST=${REDIS_HOST}
+      - REDIS_PORT=${REDIS_PORT}
+      - SECRET_KEY=${SECRET_KEY}
+      - SECRET_KEY_REFRESH=${SECRET_KEY_REFRESH}
+
+  movies_etl:
+    image: allyotov/movies_etl:1.0.0
+    container_name: movies_etl
+    environment:
+      - POSTGRES_PORT=${MOVIE_DB_PORT}
+      - POSTGRES_HOST=${MOVIE_DB_HOST}
+      - POSTGRES_USER=${MOVIE_DB_USER}
+      - POSTGRES_PASSWORD=${MOVIE_DB_PASSWORD}
+      - ES_HOST=${ES_HOST}
+      - ES_PORT=${ES_PORT}
+
+  auth_api:
+    image: allyotov/movies_auth:1.1.0
+    container_name: auth_api
+    environment:
+      - POSTGRES_PORT=${AUTH_DB_PORT}
+      - POSTGRES_HOST=${AUTH_DB_HOST}
+      - POSTGRES_USER=${AUTH_DB_USER}
+      - POSTGRES_PASSWORD=${AUTH_DB_PASSWORD}
+      - POSTGRES_DB=${AUTH_DB_NAME}
+      - REDIS_HOST=${REDIS_HOST}
+      - REDIS_PORT=${REDIS_PORT}
+      - CACHE_LIFE_TIME=${CACHE_LIFE_TIME}
+      - PROJECT_NAME=${PROJECT_NAME}
+      - SECRET_KEY=${SECRET_KEY}
+      - SECRET_KEY_REFRESH=${SECRET_KEY_REFRESH}
+      - YANDEX_CLIENT_ID=${YANDEX_CLIENT_ID}
+      - YANDEX_CLIENT_SECRET=${YANDEX_CLIENT_SECRET}
+      - GOOGLE_CLIENT_ID=${GOOGLE_CLIENT_ID}
+      - GOOGLE_CLIENT_SECRET=${GOOGLE_CLIENT_SECRET}
+      - GOOGLE_REDIRECT_URL=${GOOGLE_REDIRECT_URL}
+      - RATE_LIMIT_ON=${RATE_LIMIT_ON}
+      - REQUESTS_LIMIT_PER_MINUTE=${REQUESTS_LIMIT_PER_MINUTE}
+      - DEFAULT_ADMIN_PASSWORD=${DEFAULT_ADMIN_PASSWORD}
+      - AUTH_PORT=${AUTH_PORT}
+      - JAEGER_ON=${JAEGER_ON}
+      - JAEGER_HOST_NAME=${JAEGER_HOST_NAME}
+      - JAEGER_PORT=${JAEGER_PORT}
+      - AUTH_SENTRY_DSN=${AUTH_SENTRY_DSN}
+    depends_on:
+      - auth_db
+      - redis
+    volumes:
+      - auth-app-logs:/backend/logs/
+
+  redis:
+    image: redis:6.2.6-alpine
+    container_name: redis
+    volumes:
+      - ./redis_data:/data
+
+  notification_db:
+    container_name: notification_db
+    image: postgres:15.3
+    ports:
+      - 5432
+    environment:
+      - POSTGRES_PORT=${NOTIFICATION_DB_PORT}
+      - POSTGRES_USER=${NOTIFICATION_DB_USER}
+      - POSTGRES_PASSWORD=${NOTIFICATION_DB_PASSWORD}
+      - POSTGRES_DB=${NOTIFICATION_DB_NAME}
+    healthcheck:
+      test: [ "CMD-SHELL", "sh -c 'pg_isready -U ${NOTIFICATION_DB_USER} -d ${NOTIFICATION_DB_NAME}'" ]
+      interval: 1s
+      timeout: 3s
+      retries: 30
+    volumes:
+      - volume_notification_db:/var/lib/postgresql/data/
+      - ./srv/postgresql/init.sql:/docker-entrypoint-initdb.d/init.sql
+
+  auth_db:
+    image: postgres:15.3
+    container_name: auth_db
+    ports:
+      - 5432:5432
+    environment:
+      - POSTGRES_PORT=${AUTH_DB_PORT}
+      - POSTGRES_USER=${AUTH_DB_USER}
+      - POSTGRES_PASSWORD=${AUTH_DB_PASSWORD}
+      - POSTGRES_DB=${AUTH_DB_NAME}
+    healthcheck:
+      test: [ "CMD-SHELL", "sh -c 'pg_isready -U ${AUTH_DB_USER} -d ${AUTH_DB_NAME}'" ]
+      interval: 1s
+      timeout: 3s
+      retries: 30
+    volumes:
+      - volume_auth_db:/var/lib/postgresql/data
+
+  movie_db:
+    image: postgres:15.3
+    container_name: movie_db
+    restart: unless-stopped
+    ports:
+      - 5432
+    environment:
+      POSTGRES_USER: ${MOVIE_DB_USER}
+      POSTGRES_PASSWORD: ${MOVIE_DB_PASSWORD}
+      POSTGRES_PORT: ${MOVIE_DB_PORT}
+      POSTGRES_DB: ${MOVIE_DB_NAME}
+      POSTGRES_SCHEMA: ${MOVIE_DB_SCHEMA}
+    healthcheck:
+      test: [ "CMD-SHELL", "pg_isready -U ${MOVIE_DB_USER} -d ${MOVIE_DB_NAME}" ]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+    volumes:
+      - volume_movie_db:/var/lib/postgresql/data
+      - ./dump.sql:/docker-entrypoint-initdb.d/dump.sql:ro
+
+  mongo_db:
+    image: mongo:latest
+    container_name: mongo_single
+    ports:
+      - 27017:27017
+    healthcheck:
+      test: echo 'db.runCommand("ping").ok' | mongosh localhost:27017/profile_db --quiet
+      interval: 10s
+      timeout: 10s
+      retries: 10
+      start_period: 40s
+    volumes:
+      - mongodb_data:/data/db
+
+  admin_panel:
+    container_name: admin_panel
+    build:
+      context: admin_panel
+      dockerfile: Dockerfile
+    env_file:
+      - .env
+    ports:
+      - 8000:8000
+    healthcheck:
+      test: wget --no-verbose --tries=1 --spider http://localhost:8000/admin || exit 1
+      interval: 1s
+      retries: 30
+      start_period: 3s
+      timeout: 3s
+    depends_on:
+      notification_db:
+        condition: service_healthy
+      auth_db:
+        condition: service_healthy
+      movie_db:
+        condition: service_healthy
+      mongo_db:
+        condition: service_healthy
+    volumes:
+      - static_volume:/usr/src/static/
+      - media_volume:/usr/src/media/
+
+volumes:
+  nginx-logs:
+  volume_notification_db:
+  volume_auth_db:
+  volume_movie_db:
+  mongodb_data:
+  static_volume:
+  media_volume:
+  auth-app-logs:
